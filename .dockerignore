@@ -1,0 +1,6 @@
+.git
+.vscode
+.env
+*.key
+/mcp-grafana-proxy
+/dist

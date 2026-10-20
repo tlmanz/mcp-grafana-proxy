@@ -26,11 +26,17 @@ const logLevelEnv = "MCP_GRAFANA_PROXY_LOG_LEVEL"
 const usage = `mcp-grafana-proxy adds Google IAP authentication to mcp-grafana's requests to Grafana.
 
 Usage:
+  mcp-grafana-proxy ui     [flags]
+        Run the web UI (add environments, sign in) and the proxy for all of them.
+  mcp-grafana-proxy keygen
+        Print a new encryption key for the ui command.
   mcp-grafana-proxy exec   [flags] [-- command [args...]]
         Run mcp-grafana (or the given command) behind a private proxy.
         Use this as the command in your MCP client config.
   mcp-grafana-proxy serve  [flags]
         Run a long-lived proxy for each configured environment.
+  mcp-grafana-proxy login  [flags]
+        Sign in through your browser (mode oauth-client). Needed once per OAuth client.
   mcp-grafana-proxy doctor [flags]
         Check gcloud, the IAP token, and that IAP accepts it.
   mcp-grafana-proxy token  [flags]
@@ -54,6 +60,12 @@ func main() {
 		code, err = runExec(args)
 	case "serve":
 		err = runServe(args)
+	case "ui":
+		err = runUI(args)
+	case "keygen":
+		err = runKeygen(args)
+	case "login":
+		err = runLogin(args)
 	case "doctor":
 		code, err = runDoctor(args)
 	case "token":
@@ -156,7 +168,7 @@ type envFlags struct {
 }
 
 // adhocFlags only make sense together with --upstream.
-var adhocFlags = []string{"listen", "mode", "account", "gcloud-configuration", "service-account", "audience"}
+var adhocFlags = []string{"listen", "mode", "account", "gcloud-configuration", "service-account", "audience", "client-id", "client-secret-file"}
 
 func (f *envFlags) register(fs *flag.FlagSet, multi, listen bool) {
 	fs.StringVar(&f.configPath, "config", "", "config file (default $"+config.PathEnvVar+", or mcp-grafana-proxy/config.yaml in the user config directory)")
@@ -169,11 +181,13 @@ func (f *envFlags) register(fs *flag.FlagSet, multi, listen bool) {
 	if listen {
 		fs.StringVar(&f.adhoc.Listen, "listen", "127.0.0.1:18080", "loopback address to listen on (with --upstream)")
 	}
-	fs.StringVar(&f.adhoc.Auth.Mode, "mode", "", "token mode: user, impersonate-id-token or impersonate-jwt (with --upstream; default user)")
-	fs.StringVar(&f.adhoc.Auth.Account, "account", "", "gcloud account to use (with --upstream; default: gcloud's active account)")
+	fs.StringVar(&f.adhoc.Auth.Mode, "mode", "", "token mode: oauth-client, user, impersonate-id-token or impersonate-jwt (with --upstream; default user)")
+	fs.StringVar(&f.adhoc.Auth.Account, "account", "", "Google account to use (with --upstream; default: gcloud's active account, or the one you sign in with)")
 	fs.StringVar(&f.adhoc.Auth.GcloudConfiguration, "gcloud-configuration", "", "named gcloud configuration to use (with --upstream)")
 	fs.StringVar(&f.adhoc.Auth.ServiceAccount, "service-account", "", "service account to impersonate (with --upstream, impersonate modes)")
 	fs.StringVar(&f.adhoc.Auth.Audience, "audience", "", "token audience (with --upstream, impersonate modes)")
+	fs.StringVar(&f.adhoc.Auth.ClientID, "client-id", "", "IAP's OAuth client ID (with --upstream, mode oauth-client)")
+	fs.StringVar(&f.adhoc.Auth.ClientSecretFile, "client-secret-file", "", "file holding that client's secret (with --upstream, mode oauth-client)")
 }
 
 func (f *envFlags) resolve(fs *flag.FlagSet) ([]*config.Environment, error) {

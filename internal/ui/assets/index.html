@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="csrf-token" content="{{.CSRF}}">
+<title>mcp-grafana-proxy</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <h1>mcp-grafana-proxy</h1>
+    <p class="sub">Google IAP sign-in for the Grafana MCP server</p>
+  </div>
+</header>
+
+<main class="wrap">
+  <div id="flash" role="status" hidden></div>
+
+  <section class="info" aria-label="Setup details">
+    <div class="info-row">
+      <span class="label">Proxy for mcp-grafana</span>
+      <code>{{.ProxyURL}}/&lt;environment&gt;</code>
+    </div>
+    <div class="info-row">
+      <span class="label">Redirect URI to add to each OAuth client</span>
+      <span class="copyable"><code>{{.RedirectURI}}</code><button type="button" class="ghost small" data-copy="{{.RedirectURI}}">Copy</button></span>
+    </div>
+  </section>
+
+  <div class="toolbar">
+    <h2>Environments</h2>
+    <button type="button" id="add" class="primary">Add environment</button>
+  </div>
+
+  <form id="env-form" class="panel" hidden autocomplete="off">
+    <h3 id="form-title">Add environment</h3>
+    <div class="grid">
+      <label>Name
+        <input name="name" required pattern="[a-z0-9][a-z0-9-]{0,62}" placeholder="dev">
+        <small>Lowercase letters, digits and dashes. It becomes the path: /dev</small>
+      </label>
+      <label>Grafana URL
+        <input name="upstream" type="url" required placeholder="https://grafana.example.com">
+      </label>
+      <label>IAP OAuth client ID
+        <input name="client_id" required placeholder="1234-abc.apps.googleusercontent.com">
+        <small>The client IAP uses for this Grafana (the GCPBackendPolicy clientID).</small>
+      </label>
+      <label>OAuth client secret
+        <input name="client_secret" type="password" placeholder="">
+      </label>
+      <label>Google account <span class="optional">(optional)</span>
+        <input name="account" type="email" placeholder="you@example.com">
+        <small>Preselected when you sign in.</small>
+      </label>
+      <label>Grafana service account token <span class="optional">(optional)</span>
+        <input name="grafana_token" type="password" placeholder="glsa_...">
+        <small>Sent to Grafana when mcp-grafana sends no token of its own.</small>
+        <span class="check" id="clear-token-row" hidden><input type="checkbox" name="clear_grafana_token"> Remove the saved token</span>
+      </label>
+    </div>
+    <p class="form-error" id="form-error" role="alert" hidden></p>
+    <div class="actions">
+      <button type="submit" class="primary">Save</button>
+      <button type="button" class="ghost" id="cancel">Cancel</button>
+    </div>
+  </form>
+
+  <div id="envs"></div>
+  <p id="empty" class="empty" hidden>No environments yet. Add one to get started.</p>
+</main>
+
+<template id="env-card">
+  <article class="card">
+    <div class="card-head">
+      <h3 class="env-name"></h3>
+      <span class="badge"></span>
+    </div>
+    <dl>
+      <dt>Grafana</dt><dd class="env-upstream"></dd>
+      <dt>OAuth client</dt><dd class="env-client"></dd>
+      <dt>GRAFANA_URL</dt><dd><span class="copyable"><code class="env-grafana-url"></code><button type="button" class="ghost small copy-url">Copy</button></span></dd>
+      <dt>Grafana token</dt><dd class="env-token"></dd>
+    </dl>
+    <div class="actions">
+      <button type="button" class="primary sign-in">Sign in</button>
+      <button type="button" class="test">Test</button>
+      <button type="button" class="copy-config">Copy MCP config</button>
+      <button type="button" class="ghost edit">Edit</button>
+      <button type="button" class="ghost sign-out">Sign out</button>
+      <button type="button" class="ghost danger delete">Delete</button>
+    </div>
+    <ul class="results" hidden></ul>
+  </article>
+</template>
+</body>
+</html>

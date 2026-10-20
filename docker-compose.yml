@@ -1,0 +1,27 @@
+# Usage:
+#   echo "MCP_GRAFANA_PROXY_KEY=$(openssl rand -base64 32)" > .env && chmod 600 .env
+#   docker compose up -d --build
+#   open http://127.0.0.1:8090
+#
+# Keep .env (the encryption key) safe and out of git: without it the stored
+# settings cannot be decrypted. Back it up separately from the volume.
+services:
+  mcp-grafana-proxy:
+    build: .
+    image: mcp-grafana-proxy:local
+    restart: unless-stopped
+    environment:
+      MCP_GRAFANA_PROXY_KEY: ${MCP_GRAFANA_PROXY_KEY:?set MCP_GRAFANA_PROXY_KEY in .env (see the comment at the top)}
+    ports:
+      # Loopback only: the UI holds secrets and the proxy carries your identity.
+      - "127.0.0.1:8090:8090"   # UI
+      - "127.0.0.1:18080:18080" # proxy for mcp-grafana
+    volumes:
+      - proxy-data:/data
+    # Docker's default bridge network rather than a new per-project one: VPNs
+    # such as Tailscale can route a newly allocated 172.x subnet away from
+    # Docker, which makes the published ports unreachable.
+    network_mode: bridge
+
+volumes:
+  proxy-data:

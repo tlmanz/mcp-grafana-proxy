@@ -1,10 +1,14 @@
 package config
 
 import (
+	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/tlmanz/mcp-grafana-proxy/internal/token"
 )
 
 func writeConfig(t *testing.T, body string) string {
@@ -112,6 +116,74 @@ environments:
   prod:
     upstream: https://grafana.example.com
     auth: {mode: magic}`,
+	}
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(writeConfig(t, body)); err == nil {
+				t.Fatal("Load succeeded, want error")
+			}
+		})
+	}
+}
+
+func TestLoadOAuthClientMode(t *testing.T) {
+	path := writeConfig(t, `
+environments:
+  dev:
+    upstream: https://grafana.example.com
+    auth:
+      mode: oauth-client
+      client_id: 123-abc.apps.googleusercontent.com
+      client_secret_file: iap-secret
+      account: me@example.com
+`)
+	if err := os.WriteFile(filepath.Join(filepath.Dir(path), "iap-secret"), []byte("s3cret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := cfg.Environments["dev"].Auth
+	if a.RedirectPort != DefaultRedirectPort || a.RedirectURI() != "http://127.0.0.1:18085/" {
+		t.Errorf("redirect = %d, %s", a.RedirectPort, a.RedirectURI())
+	}
+	if !filepath.IsAbs(a.ClientSecretFile) {
+		t.Errorf("client_secret_file %q not resolved against the config directory", a.ClientSecretFile)
+	}
+	o := a.OAuthClient()
+	if o.ClientID != "123-abc.apps.googleusercontent.com" || o.ClientSecret != "s3cret" || o.LoginHint != "me@example.com" || o.Credentials == nil {
+		t.Errorf("OAuthClient() = %+v", o)
+	}
+	if _, ok := a.Source().(interface {
+		Login(context.Context, func(string) error, io.Writer) (token.Claims, error)
+	}); !ok {
+		t.Error("Source() is not the OAuth client")
+	}
+}
+
+func TestOAuthClientModeErrors(t *testing.T) {
+	tests := map[string]string{
+		"missing client_id": `
+environments:
+  dev:
+    upstream: https://grafana.example.com
+    auth: {mode: oauth-client, client_secret_file: /nonexistent}`,
+		"missing secret file": `
+environments:
+  dev:
+    upstream: https://grafana.example.com
+    auth: {mode: oauth-client, client_id: cid, client_secret_file: /nonexistent/secret}`,
+		"client_id in user mode": `
+environments:
+  dev:
+    upstream: https://grafana.example.com
+    auth: {client_id: cid}`,
+		"service account in oauth-client mode": `
+environments:
+  dev:
+    upstream: https://grafana.example.com
+    auth: {mode: oauth-client, client_id: cid, client_secret_file: /nonexistent, service_account: sa@p.iam.gserviceaccount.com}`,
 	}
 	for name, body := range tests {
 		t.Run(name, func(t *testing.T) {

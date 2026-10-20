@@ -1,29 +1,31 @@
-# Copy to the user config directory as mcp-grafana-proxy/config.yaml
-# (Linux: ~/.config/mcp-grafana-proxy/config.yaml,
-#  macOS: ~/Library/Application Support/mcp-grafana-proxy/config.yaml),
-# or point MCP_GRAFANA_PROXY_CONFIG at it.
+# Config file for the CLI modes (exec, serve, login, doctor, token). The web UI
+# (`mcp-grafana-proxy ui`, or Docker) keeps its own encrypted store instead.
+#
+# Location: mcp-grafana-proxy/config.yaml in the user config directory
+# (Linux: ~/.config, macOS: ~/Library/Application Support), or the path in
+# MCP_GRAFANA_PROXY_CONFIG.
 
 environments:
-  prod:
-    upstream: https://grafana.example.com   # Grafana base URL behind IAP (a sub-path is fine)
-    listen: 127.0.0.1:18080                 # serve mode only; exec mode picks a free port
+  dev:
+    upstream: https://grafana.dev.example.com   # Grafana base URL behind IAP (a sub-path is fine)
+    listen: 127.0.0.1:18080                     # serve mode only; exec mode picks a free port
     auth:
-      mode: user                            # default: your own gcloud identity
-      # account: you@example.com            # default: gcloud's active account
-      # gcloud_configuration: prod          # named gcloud configuration to use
+      # Sign in with IAP's own OAuth client: run `mcp-grafana-proxy login --env dev`
+      # once, after adding http://127.0.0.1:18085/ to the client's Authorized
+      # redirect URIs.
+      mode: oauth-client
+      client_id: 1234567890-abc.apps.googleusercontent.com   # IAP's OAuth client ID
+      client_secret_file: dev-client-secret   # the bare secret, or the client JSON from the console;
+                                              # relative to this file; keep it chmod 600
+      # account: you@example.com              # preselected at sign-in
+      # redirect_port: 18085                  # must match the registered redirect URI
 
-  staging:
-    upstream: https://grafana-staging.example.com
-    listen: 127.0.0.1:18081
-    auth:
-      mode: user
-
-  # Service account impersonation, for IAP resources that do not allowlist
-  # gcloud's OAuth client. Grafana's IAP header then names the service account.
+  # Service account impersonation. Works with any IAP OAuth client, including
+  # the Google-managed one, if you have Service Account Token Creator on an
+  # account that has IAP access. Grafana's IAP header then names the account.
   # shared:
   #   upstream: https://grafana-shared.example.com
-  #   listen: 127.0.0.1:18082
+  #   listen: 127.0.0.1:18081
   #   auth:
-  #     mode: impersonate-id-token
+  #     mode: impersonate-jwt
   #     service_account: grafana-mcp@my-project.iam.gserviceaccount.com
-  #     audience: 1234567890-abc.apps.googleusercontent.com   # the IAP OAuth client ID

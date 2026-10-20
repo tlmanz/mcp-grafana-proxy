@@ -203,13 +203,14 @@ func TestIAPRejections(t *testing.T) {
 		{
 			name: "401 from IAP",
 			respond: func(w http.ResponseWriter, r *http.Request) {
+				// Real IAP labels its plain-text reasons text/html.
 				w.Header().Set(iapGeneratedHeader, "true")
-				w.Header().Set("Content-Type", "text/plain")
+				w.Header().Set("Content-Type", "text/html; charset=UTF-8")
 				w.WriteHeader(http.StatusUnauthorized)
-				_, _ = io.WriteString(w, "Invalid IAP credentials: JWT audience doesn't match this application")
+				_, _ = io.WriteString(w, "Invalid IAP credentials: empty token")
 			},
 			status:          http.StatusUnauthorized,
-			wantInMsg:       "JWT audience doesn't match this application",
+			wantInMsg:       "Invalid IAP credentials: empty token",
 			wantInvalidated: true,
 		},
 		{
@@ -334,8 +335,67 @@ func TestIsLoopbackHost(t *testing.T) {
 		"":                     false,
 	}
 	for host, want := range tests {
-		if got := isLoopbackHost(host); got != want {
-			t.Errorf("isLoopbackHost(%q) = %v, want %v", host, got, want)
+		if got := IsLoopbackHost(host); got != want {
+			t.Errorf("IsLoopbackHost(%q) = %v, want %v", host, got, want)
 		}
+	}
+}
+
+func TestRouterWithPrefixAndGrafanaToken(t *testing.T) {
+	var up *upstream
+	up = newUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/grafana/redirect" {
+			http.Redirect(w, r, up.URL+"/grafana/login", http.StatusFound)
+			return
+		}
+		_, _ = io.WriteString(w, "ok")
+	})
+	target, _ := url.Parse(up.URL + "/grafana")
+	rt := &Router{}
+	rt.Set(map[string]http.Handler{
+		"dev": New(Options{Upstream: target, Tokens: &fakeTokens{tok: "iap-token"}, Prefix: "/dev", GrafanaToken: "glsa_from_store"}),
+	})
+	p := httptest.NewServer(rt)
+	t.Cleanup(p.Close)
+
+	req, _ := http.NewRequest(http.MethodGet, p.URL+"/dev/api/search?query=cpu", nil)
+	if resp, body := do(t, req); resp.StatusCode != http.StatusOK || body != "ok" {
+		t.Fatalf("got %d %q", resp.StatusCode, body)
+	}
+	got := up.requests()[0]
+	if got.URL.Path != "/grafana/api/search" || got.URL.RawQuery != "query=cpu" {
+		t.Errorf("upstream got %s?%s", got.URL.Path, got.URL.RawQuery)
+	}
+	if got.Header.Get("Authorization") != "Bearer glsa_from_store" || got.Header.Get("Proxy-Authorization") != "Bearer iap-token" {
+		t.Errorf("upstream headers: Authorization %q, Proxy-Authorization %q", got.Header.Get("Authorization"), got.Header.Get("Proxy-Authorization"))
+	}
+
+	// mcp-grafana's own token wins over the stored one.
+	req, _ = http.NewRequest(http.MethodGet, p.URL+"/dev/api/health", nil)
+	req.Header.Set("Authorization", "Bearer glsa_from_client")
+	do(t, req)
+	if got := up.requests()[1].Header.Get("Authorization"); got != "Bearer glsa_from_client" {
+		t.Errorf("Authorization = %q, want the client's", got)
+	}
+
+	// Redirects come back under the environment's prefix.
+	req, _ = http.NewRequest(http.MethodGet, p.URL+"/dev/redirect", nil)
+	if resp, _ := do(t, req); resp.Header.Get("Location") != "/dev/login" {
+		t.Errorf("Location = %q, want /dev/login", resp.Header.Get("Location"))
+	}
+
+	req, _ = http.NewRequest(http.MethodGet, p.URL+"/prod/api/health", nil)
+	resp, body := do(t, req)
+	if resp.StatusCode != http.StatusNotFound || !strings.Contains(errorMessage(t, body), `no environment "prod"`) {
+		t.Errorf("unknown environment: %d %s", resp.StatusCode, body)
+	}
+
+	req, _ = http.NewRequest(http.MethodGet, p.URL+"/dev/api/health", nil)
+	req.Header.Set("Origin", "https://attacker.example.com")
+	if resp, _ := do(t, req); resp.StatusCode != http.StatusForbidden {
+		t.Errorf("browser request through the router: %d", resp.StatusCode)
+	}
+	if n := len(up.requests()); n != 3 {
+		t.Errorf("upstream saw %d requests, want 3", n)
 	}
 }

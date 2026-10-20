@@ -4,6 +4,7 @@ package proxy
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -36,21 +37,29 @@ type TokenSource interface {
 
 // Options configures New.
 type Options struct {
-	Upstream  *url.URL
-	Tokens    TokenSource
-	Secret    string            // optional; required on every request when set
-	Transport http.RoundTripper // optional; defaults to http.DefaultTransport
-	Logger    *slog.Logger
+	Upstream     *url.URL
+	Tokens       TokenSource
+	Secret       string            // optional; required on every request when set
+	Prefix       string            // optional path prefix to strip, such as "/dev"
+	GrafanaToken string            // optional; sent as Authorization when the client sends none
+	FailureHint  string            // optional; appended to IAP rejection messages
+	Transport    http.RoundTripper // optional; defaults to http.DefaultTransport
+	Logger       *slog.Logger
 }
+
+const defaultFailureHint = "Run `mcp-grafana-proxy doctor` to check the token's identity and audience."
 
 type tokenKey struct{}
 
 type handler struct {
-	upstream *url.URL
-	tokens   TokenSource
-	secret   string
-	log      *slog.Logger
-	rp       *httputil.ReverseProxy
+	upstream     *url.URL
+	tokens       TokenSource
+	secret       string
+	prefix       string
+	grafanaToken string
+	failureHint  string
+	log          *slog.Logger
+	rp           *httputil.ReverseProxy
 }
 
 // New returns a handler that forwards requests to opts.Upstream with an IAP
@@ -58,10 +67,13 @@ type handler struct {
 // (mcp-grafana's Grafana credentials) passes through untouched.
 func New(opts Options) http.Handler {
 	h := &handler{
-		upstream: opts.Upstream,
-		tokens:   opts.Tokens,
-		secret:   opts.Secret,
-		log:      opts.Logger,
+		upstream:     opts.Upstream,
+		tokens:       opts.Tokens,
+		secret:       opts.Secret,
+		prefix:       strings.TrimRight(opts.Prefix, "/"),
+		grafanaToken: opts.GrafanaToken,
+		failureHint:  cmp.Or(opts.FailureHint, defaultFailureHint),
+		log:          opts.Logger,
 	}
 	if h.log == nil {
 		h.log = slog.New(slog.DiscardHandler)
@@ -89,14 +101,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) serve(w http.ResponseWriter, r *http.Request) {
-	// A loopback Host defeats DNS rebinding, and refusing browser requests
-	// stops web pages from using the user's identity through the proxy.
-	if !isLoopbackHost(r.Host) {
-		writeError(w, http.StatusForbidden, "mcp-grafana-proxy only accepts requests addressed to a loopback host")
-		return
-	}
-	if r.Header.Get("Origin") != "" || r.Header.Get("Sec-Fetch-Site") != "" || r.Header.Get("Sec-Fetch-Mode") != "" {
-		writeError(w, http.StatusForbidden, "mcp-grafana-proxy does not accept browser requests")
+	if status, msg := checkRequest(r); status != 0 {
+		writeError(w, status, msg)
 		return
 	}
 	if h.secret != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get(SecretHeader)), []byte(h.secret)) != 1 {
@@ -114,10 +120,31 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) rewrite(pr *httputil.ProxyRequest) {
+	if h.prefix != "" {
+		pr.Out.URL.Path = strings.TrimPrefix(pr.Out.URL.Path, h.prefix)
+		pr.Out.URL.RawPath = strings.TrimPrefix(pr.Out.URL.RawPath, h.prefix)
+	}
 	pr.SetURL(h.upstream)
 	pr.Out.Header.Del(SecretHeader)
 	tok, _ := pr.In.Context().Value(tokenKey{}).(string)
 	pr.Out.Header.Set("Proxy-Authorization", "Bearer "+tok)
+	if h.grafanaToken != "" && pr.Out.Header.Get("Authorization") == "" {
+		pr.Out.Header.Set("Authorization", "Bearer "+h.grafanaToken)
+	}
+}
+
+// checkRequest refuses requests that may come from a web page rather than
+// from mcp-grafana. It returns 0 when the request is acceptable.
+func checkRequest(r *http.Request) (status int, msg string) {
+	// A loopback Host defeats DNS rebinding, and refusing browser requests
+	// stops web pages from using the user's identity through the proxy.
+	if !IsLoopbackHost(r.Host) {
+		return http.StatusForbidden, "mcp-grafana-proxy only accepts requests addressed to a loopback host"
+	}
+	if r.Header.Get("Origin") != "" || r.Header.Get("Sec-Fetch-Site") != "" || r.Header.Get("Sec-Fetch-Mode") != "" {
+		return http.StatusForbidden, "mcp-grafana-proxy does not accept browser requests"
+	}
+	return 0, ""
 }
 
 func (h *handler) modifyResponse(resp *http.Response) error {
@@ -126,7 +153,7 @@ func (h *handler) modifyResponse(resp *http.Response) error {
 			tok, _ := resp.Request.Context().Value(tokenKey{}).(string)
 			h.tokens.Invalidate(tok)
 		}
-		msg := IAPFailureMessage(resp, status) + " Run `mcp-grafana-proxy doctor` to check the token's identity and audience."
+		msg := IAPFailureMessage(resp, status) + " " + h.failureHint
 		h.log.Warn("IAP rejected request", "path", resp.Request.URL.Path, "status", resp.StatusCode, "detail", msg)
 		replaceBody(resp, status, msg)
 		return nil
@@ -170,7 +197,7 @@ func (h *handler) rewriteLocation(loc string) string {
 			path = "/"
 		}
 	}
-	return (&url.URL{Path: path, RawQuery: u.RawQuery, Fragment: u.Fragment}).String()
+	return (&url.URL{Path: h.prefix + path, RawQuery: u.RawQuery, Fragment: u.Fragment}).String()
 }
 
 // IAPFailure reports whether resp is IAP refusing the request, and the status
@@ -197,29 +224,37 @@ func IAPFailureMessage(resp *http.Response, status int) string {
 		b.WriteString("Google IAP redirected to Google sign-in, so it did not accept the token")
 	} else {
 		fmt.Fprintf(&b, "Google IAP rejected the request (HTTP %d)", resp.StatusCode)
-		if detail := plainTextSnippet(resp); detail != "" {
+		if reason := IAPReason(resp); reason != "" {
 			b.WriteString(": ")
-			b.WriteString(detail)
+			b.WriteString(reason)
 		}
 	}
 	b.WriteString(". ")
-	if status == http.StatusForbidden {
+	switch {
+	case status == http.StatusForbidden:
 		b.WriteString("The token was valid, but this identity lacks access: it needs the IAP-secured Web App User role on this resource.")
-	} else {
-		b.WriteString("In user mode, IAP must allowlist the token's audience (gcloud's OAuth client ID) for programmatic access.")
+	case resp.StatusCode == http.StatusUnauthorized:
+		b.WriteString(`When the token in Proxy-Authorization is invalid, IAP judges the Authorization header instead, so a reason like "empty token" is about that header. `)
+		fallthrough
+	default:
+		b.WriteString("IAP only accepts tokens for its own OAuth client, or for clients listed in its programmatic_clients setting.")
 	}
 	return b.String()
 }
 
-func plainTextSnippet(resp *http.Response) string {
+// IAPReason returns IAP's plain-text reason for a rejection, or "" when the
+// body is a page rather than a reason. It reads resp.Body.
+func IAPReason(resp *http.Response) string {
 	if enc := resp.Header.Get("Content-Encoding"); enc != "" && enc != "identity" {
 		return ""
 	}
-	if strings.Contains(resp.Header.Get("Content-Type"), "html") {
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	reason := strings.Join(strings.Fields(string(b)), " ")
+	// IAP labels its plain-text reasons text/html, so judge the body itself.
+	if strings.HasPrefix(reason, "<") {
 		return ""
 	}
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-	return strings.Join(strings.Fields(string(b)), " ")
+	return reason
 }
 
 // replaceBody swaps resp for a Grafana-style JSON error, which mcp-grafana
@@ -248,7 +283,8 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	_ = json.NewEncoder(w).Encode(errorBody{Message: msg})
 }
 
-func isLoopbackHost(hostport string) bool {
+// IsLoopbackHost reports whether a Host header names a loopback address.
+func IsLoopbackHost(hostport string) bool {
 	host := hostport
 	if h, _, err := net.SplitHostPort(hostport); err == nil {
 		host = h
