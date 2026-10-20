@@ -1,0 +1,29 @@
+# Copy to the user config directory as mcp-grafana-proxy/config.yaml
+# (Linux: ~/.config/mcp-grafana-proxy/config.yaml,
+#  macOS: ~/Library/Application Support/mcp-grafana-proxy/config.yaml),
+# or point MCP_GRAFANA_PROXY_CONFIG at it.
+
+environments:
+  prod:
+    upstream: https://grafana.example.com   # Grafana base URL behind IAP (a sub-path is fine)
+    listen: 127.0.0.1:18080                 # serve mode only; exec mode picks a free port
+    auth:
+      mode: user                            # default: your own gcloud identity
+      # account: you@example.com            # default: gcloud's active account
+      # gcloud_configuration: prod          # named gcloud configuration to use
+
+  staging:
+    upstream: https://grafana-staging.example.com
+    listen: 127.0.0.1:18081
+    auth:
+      mode: user
+
+  # Service account impersonation, for IAP resources that do not allowlist
+  # gcloud's OAuth client. Grafana's IAP header then names the service account.
+  # shared:
+  #   upstream: https://grafana-shared.example.com
+  #   listen: 127.0.0.1:18082
+  #   auth:
+  #     mode: impersonate-id-token
+  #     service_account: grafana-mcp@my-project.iam.gserviceaccount.com
+  #     audience: 1234567890-abc.apps.googleusercontent.com   # the IAP OAuth client ID
